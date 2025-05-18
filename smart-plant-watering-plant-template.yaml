@@ -1,0 +1,91 @@
+globals:
+  - id: plant${plantnum}_status
+    type: std::string
+    restore_value: no
+    initial_value: '"unknown"'
+
+  - id: plant${plantnum}_last_watered
+    type: unsigned long
+    restore_value: yes
+    initial_value: "0"
+
+sensor:
+  - platform: xiaomi_hhccjcy01
+    mac_address: "${mac}"
+    moisture:
+      name: "Plant ${plantnum} Soil Moisture"
+      id: plant${plantnum}_sensor_moisture
+      on_value:
+        then:
+          - if:
+              condition:
+                and:
+                  - lambda: "return id(plant${plantnum}_status) == std::string(\"unknown\");"
+                  - lambda: "return x <= id(plant_${plantnum}_min_moisture_level).state;"
+              then:
+                - logger.log:
+                    level: WARN
+                    format: "Plant ${plantnum}: Soil dry - Schedule watering!"
+                - globals.set:
+                    id: plant${plantnum}_status
+                    value: '"needs_water"'
+                - script.execute:
+                    id: schedule_watering
+                    relay_id: !lambda "return id(plant${plantnum}_relay).state;"
+          - if:
+              condition:
+                and:
+                  - lambda: "return id(plant${plantnum}_status) == std::string(\"unknown\");"
+                  - lambda: "return x > id(plant_${plantnum}_min_moisture_level).state;"
+              then:
+                - globals.set:
+                    id: plant${plantnum}_status
+                    value: '"ok"'
+          - component.update: plant${plantnum}_status_sensor
+
+  - platform: template
+    name: "Plant ${plantnum} Last Watered Timestamp"
+    id: plant${plantnum}_last_watered_timestamp_sensor
+    icon: "mdi:clock-time-eight-outline"
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: never
+    lambda: return id(plant${plantnum}_last_watered);
+
+text_sensor:
+  - platform: template
+    id: plant${plantnum}_status_sensor
+    name: "Plant-${plantnum} Status"
+    update_interval: never
+    icon: "mdi:flower"
+    lambda: return id(plant${plantnum}_status);
+
+select:
+  - platform: template
+    name: "Plant-${plantnum}"
+    id: plant${plantnum}_relay
+    options:
+      - "relay1"
+      - "relay2"
+      - "relay3"
+      - "relay4"
+    entity_category: config
+    initial_option: "relay1"
+    restore_value: yes
+    optimistic: true
+
+number:
+  - platform: template
+    name: "Plant ${plantnum} min. Moisture Level"
+    id: plant_${plantnum}_min_moisture_level
+    entity_category: config
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    initial_value: ${initial_min_moisture_level}
+    restore_value: yes
+
+

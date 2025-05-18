@@ -1,0 +1,105 @@
+switch:
+  - platform: template
+    name: "Relay ${relaynum}"
+    id: relay${relaynum}
+    lambda: "return id(watering_process_relay${relaynum}).is_running();"
+    icon: "mdi:water-pump"
+    turn_on_action:
+      - if:
+          condition:
+            and:
+              - binary_sensor.is_off: water_tank_empty
+              - lambda: "return id(has_booted);"
+              - not: 
+                  - script.is_running: watering_process
+          then:
+            - script.execute:
+                id: watering_process_relay${relaynum}
+    turn_off_action:
+      - switch.turn_off: relay${relaynum}_internal
+      - if:
+          condition:
+            - script.is_running: watering_process_relay${relaynum}
+          then: 
+            - script.execute:
+                id: update_plants_state
+                relay_id: "relay${relaynum}"
+                newState: "watering_canceled"
+                update_timestamp: false
+            - script.execute:
+                id: stop_watering_scripts
+      - script.execute: led_status_light
+
+  - platform: gpio
+    name: "Relay ${relaynum} (Internal)"
+    id: relay${relaynum}_internal
+    restore_mode: ALWAYS_OFF
+    pin: ${relayPin}
+    inverted: true
+    internal: true
+
+number:
+  - platform: template
+    name: "Relay ${relaynum} Watering Time Total"
+    id: relay${relaynum}_watering_time_total
+    unit_of_measurement: "sec"
+    entity_category: config
+    min_value: 0
+    max_value: 120
+    step: 1
+    optimistic: true
+    mode: box
+    initial_value: ${initial_max_watering_time_seconds}
+    restore_value: yes
+
+  - platform: template
+    name: "Relay ${relaynum} Watering Pulse Time (ON)"
+    id: relay${relaynum}_watering_pulse_time_on
+    unit_of_measurement: "sec"
+    entity_category: config
+    min_value: 0
+    max_value: 120
+    step: 1
+    optimistic: true
+    mode: box
+    initial_value: 0
+    restore_value: yes
+
+  - platform: template
+    name: "Relay ${relaynum} Watering Pulse Time (OFF)"
+    id: relay${relaynum}_watering_pulse_time_off
+    unit_of_measurement: "sec"
+    entity_category: config
+    min_value: 0
+    max_value: 120
+    step: 1
+    optimistic: true
+    mode: box
+    initial_value: 0
+    restore_value: yes
+
+script:
+  - id: watering_process_relay${relaynum}
+    mode: single
+    then:
+      - script.execute:
+          id: watering_process
+          relay_id: "relay${relaynum}"
+      - script.execute: led_status_light
+      - script.wait: watering_process
+      - script.execute: led_status_light
+
+mqtt:
+  id: !extend mqtt_component
+  on_message:
+    - topic: ${name}/schedule-watering
+      payload: "relay${relaynum}"
+      qos: 1
+      then:
+        - script.execute:
+            id: schedule_watering
+            relay_id: "relay${relaynum}"
+        - mqtt.publish:
+            topic: ${name}/schedule-watering
+            payload: "ACK"
+            retain: false
