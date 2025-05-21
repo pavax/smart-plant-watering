@@ -49,7 +49,6 @@ esphome:
             transition_length: 0s
         - switch.turn_off: external_modules
         - component.update: uptime_seconds
-        #- component.update: uptime_text_sensor
         - logger.log:
             level: INFO
             format: "Going to sleep - Good Night!🌛"
@@ -64,7 +63,6 @@ packages:
     vars:
       relaynum: "1"
       relayPin: GPIO4
-      interlock_refs: "relay2_internal, relay3_internal, relay4_internal"
 
   relay2: !include
     file: common/smart-plant-watering-relay-template.yaml
@@ -113,7 +111,7 @@ packages:
     file: common/smart-plant-watering-plant-template.yaml
     vars:
       plantnum: "5"
-      mac: "80:EA:CA:88:B8:DF"
+      mac: "C4:7C:8D:65:F9:E5"
 
 globals:
   - id: has_booted
@@ -205,7 +203,6 @@ interval:
                   }
                   return true;
           then:
-            - esp32_ble_tracker.stop_scan
             - if:
                 condition:
                   switch.is_off: prevent_deep_sleep_switch
@@ -220,7 +217,7 @@ light:
     id: status_led
     rgb_order: GRB
     pin: GPIO7
-    num_leds: 30
+    num_leds: 1
     #rmt_channel: 0
     chipset: ws2812
     name: "Status Led"
@@ -425,7 +422,6 @@ api:
     - component.update: plant5_last_watered_timestamp_sensor
   on_client_disconnected:
     - script.execute: led_status_light
-    - esp32_ble_tracker.stop_scan:
 
 mqtt:
   id: mqtt_component
@@ -442,8 +438,8 @@ mqtt:
         - switch.turn_off: prevent_deep_sleep_switch
         - mqtt.publish:
             topic: ${name}/deep-sleep
-            payload: "ACK"
-            retain: false
+            payload: ""
+            retain: true
     - topic: ${name}/deep-sleep
       qos: 1
       payload: "OFF"
@@ -451,8 +447,8 @@ mqtt:
         - switch.turn_on: prevent_deep_sleep_switch
         - mqtt.publish:
             topic: ${name}/deep-sleep
-            payload: "ACK"
-            retain: false
+            payload: ""
+            retain: true
 
 deep_sleep:
   id: sleep_control
@@ -474,7 +470,7 @@ script:
     then:
       - output.turn_on: battery_gnd
       - repeat:
-          count: 20
+          count: 25
           then:
             - delay: 25ms
             - component.update: battery_voltage
@@ -529,7 +525,6 @@ script:
           id: status_led
           transition_length: 0s
       - component.update: uptime_seconds
-      #- component.update: uptime_text_sensor
       - delay: 2s
       - deep_sleep.allow: sleep_control
       - deep_sleep.enter:
@@ -613,27 +608,30 @@ script:
       - lambda: |-
           time_t now = id(esptime).now().timestamp;
 
-          // Vector of tuples: (relay_id, status_ptr, status_sensor, last_watered_ptr, timestamp_sensor)
-          std::vector<std::tuple<std::string, std::string*, template_::TemplateTextSensor*, unsigned long*, template_::TemplateSensor*>> plant_list = {
-              {id(plant1_relay).state, &id(plant1_status), id(plant1_status_sensor), &id(plant1_last_watered), id(plant1_last_watered_timestamp_sensor)},
-              {id(plant2_relay).state, &id(plant2_status), id(plant2_status_sensor), &id(plant2_last_watered), id(plant2_last_watered_timestamp_sensor)},
-              {id(plant3_relay).state, &id(plant3_status), id(plant3_status_sensor), &id(plant3_last_watered), id(plant3_last_watered_timestamp_sensor)},
-              {id(plant4_relay).state, &id(plant4_status), id(plant4_status_sensor), &id(plant4_last_watered), id(plant4_last_watered_timestamp_sensor)},
-              {id(plant5_relay).state, &id(plant5_status), id(plant5_status_sensor), &id(plant5_last_watered), id(plant5_last_watered_timestamp_sensor)}
+          // C-style array of tuples: (relay_id, status_ptr, status_sensor, last_watered_ptr, timestamp_sensor)
+          constexpr size_t NUM_PLANTS = 5;
+
+          std::tuple<std::string, std::string*, template_::TemplateTextSensor*, unsigned long*, template_::TemplateSensor*> plant_list[NUM_PLANTS] = {
+              { id(plant1_relay).state, &id(plant1_status), id(plant1_status_sensor), &id(plant1_last_watered), id(plant1_last_watered_timestamp_sensor) },
+              { id(plant2_relay).state, &id(plant2_status), id(plant2_status_sensor), &id(plant2_last_watered), id(plant2_last_watered_timestamp_sensor) },
+              { id(plant3_relay).state, &id(plant3_status), id(plant3_status_sensor), &id(plant3_last_watered), id(plant3_last_watered_timestamp_sensor) },
+              { id(plant4_relay).state, &id(plant4_status), id(plant4_status_sensor), &id(plant4_last_watered), id(plant4_last_watered_timestamp_sensor) },
+              { id(plant5_relay).state, &id(plant5_status), id(plant5_status_sensor), &id(plant5_last_watered), id(plant5_last_watered_timestamp_sensor) }
           };
 
           bool handled = false;
-          for (auto& plant_data : plant_list) {
+          for (size_t i = 0; i < NUM_PLANTS; ++i) {
+              auto& plant_data = plant_list[i];
               if (std::get<0>(plant_data) == relay_id) {
                   handled = true;
                   // Update status
                   *std::get<1>(plant_data) = newState;
-                  std::get<2>(plant_data)->publish_state(newState);
+                  std::get<2>(plant_data)->update();
                   
                   // Conditionally update timestamp
                   if (update_timestamp) {
                       *std::get<3>(plant_data) = now;
-                      std::get<4>(plant_data)->publish_state(now);
+                      std::get<4>(plant_data)->update();
                   }
               }
           }
@@ -665,23 +663,34 @@ script:
             lambda: |-
               time_t now = id(esptime).now().timestamp;
               int rewateringWaitTime = id(rewatering_wait_time_minutes).state * 60;
-
-              const std::pair<std::string, time_t> plant_last_watered[] = {
-                  {id(plant1_relay).state, static_cast<time_t>(id(plant1_last_watered))},
-                  {id(plant2_relay).state, static_cast<time_t>(id(plant2_last_watered))},
-                  {id(plant3_relay).state, static_cast<time_t>(id(plant3_last_watered))},
-                  {id(plant4_relay).state, static_cast<time_t>(id(plant4_last_watered))},
-                  {id(plant5_relay).state, static_cast<time_t>(id(plant5_last_watered))}
+              constexpr size_t NUM_PLANTS = 5;
+              const std::pair<std::string, time_t> plant_last_watered[NUM_PLANTS] = {
+                  { id(plant1_relay).state, static_cast<time_t>(id(plant1_last_watered)) },
+                  { id(plant2_relay).state, static_cast<time_t>(id(plant2_last_watered)) },
+                  { id(plant3_relay).state, static_cast<time_t>(id(plant3_last_watered)) },
+                  { id(plant4_relay).state, static_cast<time_t>(id(plant4_last_watered)) },
+                  { id(plant5_relay).state, static_cast<time_t>(id(plant5_last_watered)) }
               };
 
               time_t max_last_watered = 0;
               for (const auto& entry : plant_last_watered) {
                   if (entry.first == relay_id && entry.second > max_last_watered) {
+                      ESP_LOGI("schedule_watering", "Found matching relay '%s'",  relay_id.c_str());
                       max_last_watered = entry.second;
                   }
               }
 
-              return (now - max_last_watered) >= rewateringWaitTime;
+              bool result = (now - max_last_watered) >= rewateringWaitTime;
+
+              ESP_LOGI("schedule_watering", "Rewatering check: now: %lld, max_last_watered: %lld, rewateringWaitTime: %d, result: %s", 
+                static_cast<long long>(now), 
+                static_cast<long long>(max_last_watered), 
+                rewateringWaitTime, 
+                result
+              );
+
+              return result;
+
           then:
             - script.execute:
                 id: set_relay_state
