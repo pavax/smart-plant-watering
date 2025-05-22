@@ -9,6 +9,19 @@ substitutions:
   battery_max: "4.1" # Battery voltage indicating 100%
   battery_min: "3.3" # Battery voltage indicating 0%
   uptime_update_interval: 60s
+  battery_measurement_samples: "30" # Number of samples to take for battery measurement
+  battery_measurement_delay_ms: "10" # Delay between ADC samples in milliseconds
+  
+  # GPIO Pins
+  pin_relay1: "GPIO4"
+  pin_relay2: "GPIO8"
+  pin_relay3: "GPIO6"
+  pin_relay4: "GPIO10"
+  pin_status_led: "GPIO7"
+  pin_battery_gnd: "GPIO2"
+  pin_water_tank: "GPIO1"
+  pin_battery_voltage: "GPIO3"
+  pin_external_modules: "GPIO5"
 
 esp32:
   board: lolin_c3_mini
@@ -62,25 +75,25 @@ packages:
     file: common/smart-plant-watering-relay-template.yaml
     vars:
       relaynum: "1"
-      relayPin: GPIO4
+      relayPin: ${pin_relay1}
 
   relay2: !include
     file: common/smart-plant-watering-relay-template.yaml
     vars:
       relaynum: "2"
-      relayPin: GPIO8
+      relayPin: ${pin_relay2}
 
   relay3: !include
     file: common/smart-plant-watering-relay-template.yaml
     vars:
       relaynum: "3"
-      relayPin: GPIO6
+      relayPin: ${pin_relay3}
 
   relay4: !include
     file: common/smart-plant-watering-relay-template.yaml
     vars:
       relaynum: "4"
-      relayPin: GPIO10
+      relayPin: ${pin_relay4}
 
   # PLANTS
   plant1: !include
@@ -129,9 +142,14 @@ globals:
     restore_value: no
     initial_value: "0"
 
+  - id: time_synced
+    type: bool
+    restore_value: no
+    initial_value: "false"
+
 interval:
   - interval: 2sec
-    id: "stop_scanning_interval"
+    id: stop_scanning_interval
     startup_delay: 10sec
     then:
       - if:
@@ -152,6 +170,7 @@ interval:
                 return true;
           then:
             - lambda: |-
+                // Stop BLE Scanning
                 static bool executed = false;
                 if (!executed) {
                   ESP_LOGI("main", "Stop BLE Scanning");
@@ -162,7 +181,7 @@ interval:
                 }
 
   - interval: 5s
-    id: "max_running_time_reached_interval"
+    id: max_running_time_reached_interval
     startup_delay: 60s
     then:
       - if:
@@ -181,14 +200,16 @@ interval:
             - script.execute: prepare_shutdown
 
   - interval: 5sec
-    id: "duty_done_interval"
+    id: duty_done_interval
     startup_delay: 20s
     then:
       - if:
           condition:
             and:
               - lambda: "return id(all_plants_scanned);"
+              - switch.is_off: prevent_deep_sleep_switch
               - lambda: |-
+                  // Check the state of all plants
                   for (const auto* status : {
                     &id(plant1_status),
                     &id(plant2_status),
@@ -203,22 +224,17 @@ interval:
                   }
                   return true;
           then:
-            - if:
-                condition:
-                  switch.is_off: prevent_deep_sleep_switch
-                then:
-                  - logger.log:
-                      level: INFO
-                      format: "Everything is done - Prepare Deep Sleep!"
-                  - script.execute: prepare_shutdown
+            - logger.log:
+                level: INFO
+                format: "Everything is done - Prepare Deep Sleep!"
+            - script.execute: prepare_shutdown
 
 light:
   - platform: esp32_rmt_led_strip
     id: status_led
     rgb_order: GRB
-    pin: GPIO7
+    pin: ${pin_status_led}
     num_leds: 1
-    #rmt_channel: 0
     chipset: ws2812
     name: "Status Led"
     effects:
@@ -237,7 +253,7 @@ output:
   - platform: gpio
     id: battery_gnd
     pin:
-      number: GPIO2
+      number: ${pin_battery_gnd}
       inverted: true
       mode:
         output: true
@@ -256,7 +272,7 @@ binary_sensor:
     # ON means problem detected (tank is empty) whereas OFF means no problem (tank is full).
     device_class: problem
     pin:
-      number: GPIO1
+      number: ${pin_water_tank}
       inverted: false
       mode:
         input: true
@@ -278,7 +294,7 @@ binary_sensor:
 
 sensor:
   - platform: adc
-    pin: GPIO3
+    pin: ${pin_battery_voltage}
     name: "Battery Voltage"
     id: battery_voltage
     icon: "mdi:flash"
@@ -287,8 +303,8 @@ sensor:
     update_interval: never
     filters:
       - median:
-          window_size: 5
-          send_every: 5
+          window_size: ${battery_measurement_samples}
+          send_every: ${battery_measurement_samples}
           send_first_at: 1
       - multiply: 2.0
       - round: 2
@@ -331,7 +347,7 @@ switch:
     id: external_modules
     restore_mode: ALWAYS_OFF
     pin:
-      number: GPIO5
+      number: ${pin_external_modules}
       inverted: false
     on_turn_off:
       - script.execute:
@@ -449,6 +465,38 @@ mqtt:
             topic: ${name}/deep-sleep
             payload: ""
             retain: true
+    
+    - topic: ${name}/schedule-watering
+      qos: 1
+      then:
+        - logger.log:
+            level: INFO
+            format: "Received watering request with payload: '%s'"
+            args: [x.c_str()]
+        - if:
+            condition:
+              lambda: "return !x.empty();"
+            then:
+              - if:
+                  condition:
+                    or:
+                      - lambda: "return x == \"relay1\";"
+                      - lambda: "return x == \"relay2\";"
+                      - lambda: "return x == \"relay3\";"
+                      - lambda: "return x == \"relay4\";"
+                  then:
+                    - script.execute:
+                        id: schedule_watering
+                        relay_id: !lambda "return x;"
+                    - mqtt.publish:
+                        topic: ${name}/schedule-watering
+                        payload: ""
+                        retain: true
+                  else:
+                    - logger.log:
+                        level: WARN
+                        format: "Received invalid payload: '%s'"
+                        args: [x.c_str()]
 
 deep_sleep:
   id: sleep_control
@@ -470,9 +518,9 @@ script:
     then:
       - output.turn_on: battery_gnd
       - repeat:
-          count: 25
+          count: ${battery_measurement_samples}
           then:
-            - delay: 25ms
+            - delay: ${battery_measurement_delay_ms}ms
             - component.update: battery_voltage
       - output.turn_off: battery_gnd
 
@@ -536,67 +584,43 @@ script:
     then:
       - delay: 100ms
       - lambda: |-
-          // Only proceed if status_led is currently on
-          //if (!id(status_led).current_values.is_on()) {
-          // return;
-          //}
+          // Helper function to configure LED
+          auto configure_led = [](float r, float g, float b, const char* effect) {
+            id(status_led).turn_on()
+              .set_effect(effect)
+              .set_red(r)
+              .set_green(g)
+              .set_blue(b)
+              .set_brightness(1.0)
+              .perform();
+          };
 
           // Tank Empty -> Red
           if (id(water_tank_empty).state) {
-            id(status_led).turn_on()
-              .set_effect("Pulse")
-              .set_red(1.0)
-              .set_green(0.0)
-              .set_blue(0.0)
-              .set_brightness(1.0)
-              .perform();
-              return;
-          } 
+            configure_led(1.0, 0.0, 0.0, "Pulse");
+            return;
+          }
 
           // Not Connected -> Magenta
           if (!id(api_id).is_connected()) {
-              id(status_led).turn_on()
-              .set_effect("Pulse")
-              .set_red(1.0)
-              .set_green(0.0)
-              .set_blue(1.0)
-              .set_brightness(1.0)
-              .perform();
-              return;
-          } 
+            configure_led(1.0, 0.0, 1.0, "Pulse");
+            return;
+          }
 
-          // watering process is running -> yellow
+          // Watering process is running -> Yellow
           if (id(watering_process).is_running()) {
-             id(status_led).turn_on()
-              .set_effect("Breathing")
-              .set_red(1.0)
-              .set_green(1.0)
-              .set_blue(0.0)
-              .set_brightness(1.0)
-              .perform();
-              return;
+            configure_led(1.0, 1.0, 0.0, "Breathing");
+            return;
           }
 
           // All Plants Scanned -> Cyan
-          if (id(all_plants_scanned)){
-            id(status_led).turn_on()
-              .set_effect("Breathing")
-              .set_red(0.0)
-              .set_green(1.0)
-              .set_blue(0.8)
-              .set_brightness(1.0)
-              .perform();
-              return;
+          if (id(all_plants_scanned)) {
+            configure_led(0.0, 1.0, 0.8, "Breathing");
+            return;
           }
 
           // OK -> Blue
-          id(status_led).turn_on()
-            .set_effect("Breathing")
-            .set_red(0.0)
-            .set_green(0.0)
-            .set_blue(1.0)
-            .set_brightness(1.0)
-            .perform();
+          configure_led(0.0, 0.0, 1.0, "Breathing");
 
   - id: update_plants_state
     mode: queued
@@ -624,6 +648,8 @@ script:
               auto& plant_data = plant_list[i];
               if (std::get<0>(plant_data) == relay_id) {
                   handled = true;
+                  ESP_LOGI("update_plants_state", "Plant %d: %s -> %s", i + 1, std::get<1>(plant_data)->c_str(), newState.c_str());
+                  
                   // Update status
                   *std::get<1>(plant_data) = newState;
                   std::get<2>(plant_data)->update();
@@ -637,7 +663,7 @@ script:
           }
 
           if (!handled) {
-              ESP_LOGW("update_plants_state", "Unknown relay_id: %s", relay_id.c_str());
+              ESP_LOGW("update_plants_state", "No plants configured for: %s", relay_id.c_str());
           }
 
   - id: schedule_watering
@@ -655,6 +681,7 @@ script:
       - wait_until:
           and:
             - lambda: "return id(has_booted);"
+            - lambda: "return id(time_synced);"
             - binary_sensor.is_off: water_tank_empty
             - not:
                 - script.is_running: watering_process
@@ -663,32 +690,24 @@ script:
             lambda: |-
               time_t now = id(esptime).now().timestamp;
               int rewateringWaitTime = id(rewatering_wait_time_minutes).state * 60;
-              constexpr size_t NUM_PLANTS = 5;
-              const std::pair<std::string, time_t> plant_last_watered[NUM_PLANTS] = {
-                  { id(plant1_relay).state, static_cast<time_t>(id(plant1_last_watered)) },
-                  { id(plant2_relay).state, static_cast<time_t>(id(plant2_last_watered)) },
-                  { id(plant3_relay).state, static_cast<time_t>(id(plant3_last_watered)) },
-                  { id(plant4_relay).state, static_cast<time_t>(id(plant4_last_watered)) },
-                  { id(plant5_relay).state, static_cast<time_t>(id(plant5_last_watered)) }
-              };
-
-              time_t max_last_watered = 0;
-              for (const auto& entry : plant_last_watered) {
-                  if (entry.first == relay_id && entry.second > max_last_watered) {
-                      ESP_LOGI("schedule_watering", "Found matching relay '%s'",  relay_id.c_str());
-                      max_last_watered = entry.second;
-                  }
-              }
-
-              bool result = (now - max_last_watered) >= rewateringWaitTime;
-
-              ESP_LOGI("schedule_watering", "Rewatering check: now: %lld, max_last_watered: %lld, rewateringWaitTime: %d, result: %s", 
-                static_cast<long long>(now), 
-                static_cast<long long>(max_last_watered), 
+              
+              // Find the last watered time for the current relay
+              time_t last_watered = 0;
+              if (relay_id == id(plant1_relay).state) last_watered = id(plant1_last_watered);
+              else if (relay_id == id(plant2_relay).state) last_watered = id(plant2_last_watered);
+              else if (relay_id == id(plant3_relay).state) last_watered = id(plant3_last_watered);
+              else if (relay_id == id(plant4_relay).state) last_watered = id(plant4_last_watered);
+              else if (relay_id == id(plant5_relay).state) last_watered = id(plant5_last_watered);
+              
+              time_t timePassed = now - last_watered;
+              bool result = timePassed >= rewateringWaitTime;
+              
+              ESP_LOGI("schedule_watering", "Rewatering check: timePassed: %lld >= rewateringWaitTime: %d => result: %s", 
+                static_cast<long long>(timePassed), 
                 rewateringWaitTime, 
-                result
+                result ? "true" : "false"
               );
-
+              
               return result;
 
           then:
@@ -838,6 +857,7 @@ script:
           relay_id: !lambda "return relay_id;"
           state: "OFF"
           use_internal: true
+      - lambda: "id(elapsed_watering_time) = total_time * 1000;"
 
   - id: stop_watering_scripts
     mode: single
@@ -863,3 +883,11 @@ time:
       - 0.pool.ntp.org
       - 1.pool.ntp.org
       - 2.pool.ntp.org
+    on_time_sync:
+      then:
+        - globals.set:
+            id: time_synced
+            value: "true"
+        - logger.log:
+            level: INFO
+            format: "Time synchronized successfully"

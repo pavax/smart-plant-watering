@@ -21,6 +21,9 @@ switch:
           condition:
             - script.is_running: watering_process_relay${relaynum}
           then: 
+            - logger.log:
+                level: WARN
+                format: "relay${relaynum}: cancel watering process"
             - script.execute:
                 id: update_plants_state
                 relay_id: "relay${relaynum}"
@@ -88,18 +91,3 @@ script:
       - script.execute: led_status_light
       - script.wait: watering_process
       - script.execute: led_status_light
-
-mqtt:
-  id: !extend mqtt_component
-  on_message:
-    - topic: ${name}/schedule-watering
-      payload: "relay${relaynum}"
-      qos: 1
-      then:
-        - script.execute:
-            id: schedule_watering
-            relay_id: "relay${relaynum}"
-        - mqtt.publish:
-            topic: ${name}/schedule-watering
-            payload: "ACK"
-            retain: false
