@@ -9,7 +9,7 @@ switch:
           condition:
             and:
               - binary_sensor.is_off: water_tank_empty
-              - lambda: "return id(has_booted);"
+              - lambda: "return id(is_system_ready);"
               - not: 
                   - script.is_running: watering_process
           then:
@@ -30,7 +30,7 @@ switch:
                 newState: "watering_canceled"
                 update_timestamp: false
             - script.execute:
-                id: stop_watering_scripts
+                id: cancel_watering_process
       - script.execute: led_status_light
 
   - platform: gpio
@@ -78,6 +78,19 @@ number:
     step: 1
     optimistic: true
     mode: box
+    initial_value: 0
+    restore_value: yes
+
+  - platform: template
+    name: "Relay ${relaynum} Main Pump Power"
+    id: relay${relaynum}_main_pump_power
+    unit_of_measurement: "%"
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 1
+    optimistic: true
+    mode: SLIDER
     initial_value: 0
     restore_value: yes
 

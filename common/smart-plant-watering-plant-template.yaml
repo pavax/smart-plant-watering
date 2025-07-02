@@ -63,15 +63,16 @@ text_sensor:
 
 select:
   - platform: template
-    name: "Plant-${plantnum}"
+    name: "Plant-${plantnum} relay assignment"
     id: plant${plantnum}_relay
     options:
+      - "Unassigned"
       - "relay1"
       - "relay2"
       - "relay3"
       - "relay4"
     entity_category: config
-    initial_option: "relay1"
+    initial_option: "Unassigned"
     restore_value: yes
     optimistic: true
 
